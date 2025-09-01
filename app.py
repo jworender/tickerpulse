@@ -1,4 +1,5 @@
 import os, json, time, math
+import logging
 from datetime import datetime, timezone
 from typing import Optional, Literal, Dict, Any
 from fastapi import FastAPI, HTTPException
@@ -23,6 +24,27 @@ if not OPENAI_API_KEY:
     print("WARNING: OPENAI_API_KEY not set. The app will error on first LLM call.")
 
 client = OpenAI(base_url=OPENAI_API_BASE, api_key=OPENAI_API_KEY)
+
+logger = logging.getLogger("app")
+
+def llm_complete(messages, model, temperature=0.3, try_json=True):
+    """Call the OpenAI-compatible Chat Completions API.
+    If the server rejects response_format, retry without it."""
+    kwargs = dict(model=model, temperature=temperature, messages=messages)
+    if try_json:
+        kwargs["response_format"] = {"type": "json_object"}
+    try:
+        resp = client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content
+    except Exception as e:
+        msg = str(e)
+        # Retry without response_format if the server doesn't support it
+        if try_json and ("response_format" in msg or "Unrecognized request argument" in msg or "unsupported" in msg.lower()):
+            logger.warning("Retrying LLM call without response_format due to: %s", msg)
+            resp = client.chat.completions.create(model=model, temperature=temperature, messages=messages)
+            return resp.choices[0].message.content
+        # Pass through other errors
+        raise
 
 # ---- FastAPI app ----
 app = FastAPI(title=APP_NAME)
@@ -54,42 +76,50 @@ def research(req: ResearchRequest):
     ticker = req.ticker.strip().upper()
     if not ticker or len(ticker) > 15:
         raise HTTPException(status_code=400, detail="Invalid ticker.")
-    # Gather structured context (prices, quick facts, optional news/search)
+
+    # Gather context
     try:
         ctx = gather_context(ticker=ticker, asset_type=req.asset_type, use_search=req.use_search)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Context gathering failed: {e}")
 
-    # Build messages for the LLM
     messages, response_format = build_messages(ctx=ctx, user_question=req.question)
 
     # Choose model
     model = req.model or OPENAI_MODEL
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set on the server.")
+    if not model:
+        raise HTTPException(status_code=500, detail="No model configured. Set OPENAI_MODEL or pass 'model' in the request.")
 
-    # Call LLM (request JSON if supported)
+    # Call LLM with compatibility retry
     try:
-        completion = client.chat.completions.create(
-            model=model,
-            temperature=0.3,
-            messages=messages,
-            response_format=response_format,  # {"type":"json_object"} on OpenAI / compatible
-        )
-        content = completion.choices[0].message.content
-        # Ensure parseable JSON
+        content = llm_complete(messages=messages, model=model, try_json=True)
         try:
             payload = json.loads(content)
         except Exception:
-            # Fallback: wrap raw text
             payload = {
-                "ticker": ticker,
+                "ticker": ctx.get("ticker"),
+                "entity_name": ctx.get("entity_name"),
+                "asset_type": ctx.get("asset_type"),
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "summary": content,
-                "raw_text": content,
-                "disclaimer": "This output could not be parsed into the expected JSON shape. Treat as unstructured notes. Not financial advice."
+                "drivers": {"near_term": {"positives": [], "negatives": []},
+                            "medium_term": {"positives": [], "negatives": []},
+                            "long_term": {"positives": [], "negatives": []}},
+                "timeline_assessment": [],
+                "risks_and_mitigants": [],
+                "sources_index": ctx.get("sources_index", []),
+                "disclaimer": "This output was unstructured text; JSON parse failed. Treat as notes. Not financial advice."
             }
-
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
+        # Improve the message for common cases
+        msg = str(e)
+        if "does not exist" in msg and "model" in msg.lower():
+            raise HTTPException(status_code=502, detail=f"LLM model not found on server ('{model}'). Set OPENAI_MODEL to a valid model for your OPENAI_API_BASE.")
+        if "invalid api key" in msg.lower() or "authentication" in msg.lower():
+            raise HTTPException(status_code=502, detail="Authentication failed with the LLM provider. Check OPENAI_API_KEY.")
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {msg}")
 
     payload["_meta"] = {
         "ticker": ticker,
@@ -102,3 +132,15 @@ def research(req: ResearchRequest):
         }
     }
     return JSONResponse(payload)
+
+@app.get("/diag/llm")
+def diag_llm():
+    try:
+        content = llm_complete(
+            messages=[{"role":"user","content":"Reply with a tiny valid JSON: {\"ok\":true}"}],
+            model=OPENAI_MODEL,
+            try_json=False  # plain text to minimize surface area
+        )
+        return {"ok": True, "model": OPENAI_MODEL, "sample": content[:200]}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)

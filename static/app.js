@@ -120,16 +120,28 @@ form.addEventListener("submit", async (e) => {
       headers: {"Content-Type":"application/json"},
       body: JSON.stringify({ ticker, asset_type: assetType, use_search: useSearch, question })
     });
-    const data = await res.json();
+
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* leave as text */ }
+
     // Remove spinner bubble
     const spinEl = document.getElementById(spinnerId);
     if (spinEl) spinEl.parentElement.parentElement.remove();
+
+    if (!res.ok) {
+      const detail = (data && (data.detail || data.error || data.message)) || text || "Unknown error";
+      addMsg("bot", `<b>API error ${res.status}</b><br><span class='muted small'>${detail}</span>`);
+      return;
+    }
+
     renderReport(data);
   } catch (err) {
     const spinEl = document.getElementById(spinnerId);
     if (spinEl) spinEl.parentElement.parentElement.remove();
-    addMsg("bot", `<b>Error:</b> ${(err && err.message) || err}`);
+    addMsg("bot", `<b>Network error:</b> ${(err && err.message) || err}`);
   } finally {
     inpTicker.select();
   }
+
 });
