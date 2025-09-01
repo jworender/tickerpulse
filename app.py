@@ -28,23 +28,51 @@ client = OpenAI(base_url=OPENAI_API_BASE, api_key=OPENAI_API_KEY)
 logger = logging.getLogger("app")
 
 def llm_complete(messages, model, temperature=0.3, try_json=True):
-    """Call the OpenAI-compatible Chat Completions API.
-    If the server rejects response_format, retry without it."""
-    kwargs = dict(model=model, temperature=temperature, messages=messages)
+    """
+    Call the Chat Completions API with graceful fallbacks:
+    - If the server rejects response_format, retry without it.
+    - If the server rejects temperature, retry without it (use provider default).
+    """
+    kwargs = dict(model=model, messages=messages)
+
+    # Optional: let env pin max_tokens (some providers require it)
+    mx = os.getenv("OPENAI_MAX_TOKENS")
+    if mx and mx.isdigit():
+        kwargs["max_tokens"] = int(mx)
+
     if try_json:
         kwargs["response_format"] = {"type": "json_object"}
-    try:
-        resp = client.chat.completions.create(**kwargs)
-        return resp.choices[0].message.content
-    except Exception as e:
-        msg = str(e)
-        # Retry without response_format if the server doesn't support it
-        if try_json and ("response_format" in msg or "Unrecognized request argument" in msg or "unsupported" in msg.lower()):
-            logger.warning("Retrying LLM call without response_format due to: %s", msg)
-            resp = client.chat.completions.create(model=model, temperature=temperature, messages=messages)
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    for _ in range(3):  # up to 3 adaptive attempts
+        try:
+            resp = client.chat.completions.create(**kwargs)
             return resp.choices[0].message.content
-        # Pass through other errors
-        raise
+        except Exception as e:
+            msg = str(e)
+            low = msg.lower()
+
+            # If temperature is not accepted, drop it and retry
+            if ("temperature" in low and ("unsupported" in low or "does not support" in low)) and "temperature" in kwargs:
+                logger.warning("Provider rejected temperature; retrying without it. Error: %s", msg)
+                kwargs.pop("temperature", None)
+                continue
+
+            # If response_format not accepted, drop it and retry
+            if ("response_format" in low or "unrecognized request argument" in low) and "response_format" in kwargs:
+                logger.warning("Provider rejected response_format; retrying without it. Error: %s", msg)
+                kwargs.pop("response_format", None)
+                continue
+
+            # If max_tokens is required, add a safe default and retry once
+            if ("max_tokens" in low and "required" in low) and "max_tokens" not in kwargs:
+                logger.warning("Provider requires max_tokens; retrying with 1024. Error: %s", msg)
+                kwargs["max_tokens"] = 1024
+                continue
+
+            # Otherwise, bubble up the error
+            raise
 
 # ---- FastAPI app ----
 app = FastAPI(title=APP_NAME)

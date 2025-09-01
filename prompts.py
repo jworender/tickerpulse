@@ -35,7 +35,7 @@ Return a single JSON object with this exact shape:
     {
       "driver": "<short label>",
       "timeframe": "near-term (0-3 months)" | "medium-term (3-12 months)" | "long-term (1-3+ years)",
-      "expected_window": "<e.g., Oct–Dec 2025>",
+      "expected_window": "<e.g., Oct-Dec 2025>",
       "likelihood": 0.0-1.0,
       "confidence": "low" | "medium" | "high",
       "rationale": "<succinct reasoning>",
@@ -54,7 +54,7 @@ Return a single JSON object with this exact shape:
 """
 
 GUIDANCE = """
-Time buckets: near-term = 0–3 months; medium-term = 3–12 months; long-term = 1–3+ years.
+Time buckets: near-term = 0-3 months; medium-term = 3-12 months; long-term = 1-3+ years.
 If formal sources are limited, lean on industry knowledge and make that explicit; still keep structure.
 Be specific about mechanisms (unit economics, margins, regulation, roadmap, demand/supply, catalysts).
 Never fabricate sources; only include IDs that appear in sources_index.
