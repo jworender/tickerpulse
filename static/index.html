@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ticker Research</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">Ticker Research</div>
+    <div class="sub">LLM-assisted catalysts & timeline (demo) • Not financial advice</div>
+  </header>
+
+  <main>
+    <div id="chat">
+      <div class="msg bot">
+        <div class="bubble">
+          Enter a <b>stock</b> or <b>crypto</b> ticker (e.g., <code>AAPL</code>, <code>TSLA</code>, <code>BTC</code>) and I’ll outline
+          near/medium/long-term <i>positives</i> and <i>negatives</i> and which are likely to occur (with expected timing).
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <form id="composer">
+    <div class="row">
+      <input id="ticker" placeholder="Ticker (e.g., AAPL or BTC)" autocomplete="off" />
+      <select id="assetType">
+        <option value="auto" selected>auto</option>
+        <option value="equity">equity</option>
+        <option value="crypto">crypto</option>
+      </select>
+      <label class="chk">
+        <input id="useSearch" type="checkbox" checked />
+        <span>Use web search (Tavily)</span>
+      </label>
+    </div>
+    <div class="row">
+      <input id="question" placeholder="Optional: add a question or focus (e.g., 'ETFs or regulatory risks')" />
+      <button type="submit">Research</button>
+    </div>
+  </form>
+
+  <footer>
+    <small>For education only. Not investment advice.</small>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
