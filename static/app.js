@@ -4,6 +4,9 @@ const inpTicker = document.getElementById("ticker");
 const selType = document.getElementById("assetType");
 const chkSearch = document.getElementById("useSearch");
 const inpQuestion = document.getElementById("question");
+const chkYouTube = document.getElementById("useYouTube");
+
+let appConfig = { features: { youtube: true }, youtube_requires_plan: false, plan: "free" };
 
 function addMsg(role, html) {
   const wrap = document.createElement("div");
@@ -136,6 +139,14 @@ form.addEventListener("submit", async (e) => {
     }
 
     renderReport(data);
+    if (chkYouTube.checked) {
+      triggerYouTube(
+        data.ticker,
+        data.entity_name || data.ticker,
+        data.asset_type || "auto",
+        data.drivers || {}
+      );
+    }
   } catch (err) {
     const spinEl = document.getElementById(spinnerId);
     if (spinEl) spinEl.parentElement.parentElement.remove();
@@ -145,3 +156,94 @@ form.addEventListener("submit", async (e) => {
   }
 
 });
+
+function renderYouTubeSection(y) {
+  const head = `<div class='section-title'>YouTube sentiment (last ${y.lookback_days} days)</div>`;
+  const agg = y.aggregate_sentiment && y.aggregate_sentiment.label
+    ? `<div class='muted small'>Aggregate stance: <b>${y.aggregate_sentiment.label}</b> (avg score ${y.aggregate_sentiment.avg_score?.toFixed(2) ?? "—"})</div>`
+    : `<div class='muted small'>No transcripts analyzed.</div>`;
+
+  const table = (!y.table_rows || !y.table_rows.length) ? "<div class='muted small'>No recent videos.</div>"
+    : `<table>
+        <thead><tr><th>Date</th><th>Time (UTC)</th><th>Title</th><th>Creator</th><th>Link</th></tr></thead>
+        <tbody>
+          ${y.table_rows.map(r => `
+            <tr>
+              <td>${r.date}</td>
+              <td>${r.time}</td>
+              <td>${r.title}</td>
+              <td>${r.creator}</td>
+              <td><a href="${r.url}" target="_blank" rel="noopener">Watch</a></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>`;
+
+  addMsg("bot", head + agg + table);
+}
+
+async function triggerYouTube(ticker, entityName, assetType, drivers) {
+  const spinnerId = `spin-yt-${Date.now()}`;
+  addMsg("bot", `<span class="spinner" id="${spinnerId}"></span> <span class='muted'>Scanning YouTube (last 7 days)...</span>`);
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (appConfig?.plan) headers["X-Client-Plan"] = appConfig.plan;
+
+    const res = await fetch("/api/youtube/sentiment", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ticker,
+        entity_name: entityName,
+        asset_type: assetType,
+        drivers,
+        lookback_days: 7,
+        max_videos: 5
+      })
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { data = { error: text }; }
+    const spinEl = document.getElementById(spinnerId);
+    if (spinEl) spinEl.parentElement.parentElement.remove();
+    if (!res.ok) {
+      addMsg("bot", `<b>YouTube error ${res.status}</b><br><span class='muted small'>${data?.detail || data?.error || text}</span>`);
+      return;
+    }
+    renderYouTubeSection(data);
+  } catch (err) {
+    const spinEl = document.getElementById(spinnerId);
+    if (spinEl) spinEl.parentElement.parentElement.remove();
+    addMsg("bot", `<b>YouTube fetch error:</b> ${err?.message || err}`);
+  }
+}
+
+async function loadConfig() {
+  try {
+    const res = await fetch("/api/config");
+    if (!res.ok) return;
+    appConfig = await res.json();
+
+    const ytEnabled = !(appConfig.features && appConfig.features.youtube === false);
+    const requirePro = !!appConfig.youtube_requires_plan;
+    const plan = (appConfig.plan || "free").toLowerCase();
+
+    const wrap = document.getElementById("useYouTubeWrap");
+    const pill = document.getElementById("useYouTubePill");
+    const label = document.getElementById("useYouTubeLabel");
+
+    if (!ytEnabled) {
+      wrap.style.display = "none";
+      return;
+    }
+    // Show Pro pill only if gated and user is not pro
+    if (requirePro && plan !== "pro") {
+      chkYouTube.disabled = true;
+      chkYouTube.checked = false;
+      pill.style.display = "inline-block";
+      label.title = "Pro feature – upgrade to enable";
+    } else {
+      pill.style.display = "none";
+    }
+  } catch { /* ignore; default config already set */ }
+}
+loadConfig();
