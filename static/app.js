@@ -173,6 +173,7 @@ function renderYouTubeSection(y) {
               <td>${r.time}</td>
               <td>${r.title}</td>
               <td>${r.creator}</td>
+              <td>${(v.transcript_source || "—")}</td>
               <td><a href="${r.url}" target="_blank" rel="noopener">Watch</a></td>
             </tr>`).join("")}
         </tbody>

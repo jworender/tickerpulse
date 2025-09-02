@@ -19,6 +19,18 @@ OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
+TRANSCRIPT_LANGS = os.getenv("TRANSCRIPT_LANGS", "en,en-US,en-GB,es,pt,fr,de,ru,hi,ja,ko,zh-Hans,zh-Hant").split(",")
+YOUTUBE_TRANSLATE_TO_EN = os.getenv("YOUTUBE_TRANSLATE_TO_EN", "1") == "1"
+YOUTUBE_COMMENTS_FALLBACK = os.getenv("YOUTUBE_COMMENTS_FALLBACK", "0") == "1"
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", None)
+try:
+    if TAVILY_API_KEY:
+        from tavily import TavilyClient
+        tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+    else:
+        tavily_client = None
+except Exception:
+    tavily_client = None
 
 if not OPENAI_API_KEY:
     # Render won't start until you set this; local dev can set via .env
@@ -173,14 +185,135 @@ def _fetch_transcript_text(video_id: str) -> str | None:
         # Network or throttling; just skip this video
         return None
 
-def _build_youtube_messages(tkr: str, entity_name: str, drivers: List[str], transcript: str, video_meta: dict) -> List[dict]:
+def _fetch_transcript_text_flexible(video_meta: dict) -> tuple[Optional[str], dict]:
+    """
+    Try multiple legit sources for transcript text in priority:
+    1) YouTube manual/auto English
+    2) YouTube manual/auto in allowed langs (+ optional translate to EN)
+    3) External transcript/show notes via Tavily (if available)
+    Returns (text, meta) where meta includes source/lang/translated/url (if external).
+    """
+    video_id = video_meta["videoId"]
+
+    # 1–2) YouTube transcript objects
+    try:
+        listing = YouTubeTranscriptApi.list_transcripts(video_id)
+    except Exception:
+        listing = None
+
+    if listing:
+        # Manual English first
+        try:
+            tr = listing.find_manually_created_transcript(["en", "en-US", "en-GB"])
+            segs = tr.fetch()
+            text = " ".join(s.get("text","") for s in segs)
+            if text.strip():
+                return text, {"source":"youtube_manual", "lang": tr.language_code, "translated": False}
+        except Exception:
+            pass
+        # Auto English
+        try:
+            tr = listing.find_generated_transcript(["en", "en-US", "en-GB"])
+            segs = tr.fetch()
+            text = " ".join(s.get("text","") for s in segs)
+            if text.strip():
+                return text, {"source":"youtube_auto", "lang": tr.language_code, "translated": False}
+        except Exception:
+            pass
+        # Any other allowed language (manual → auto), optionally translate to EN
+        for finder in ("find_manually_created_transcript", "find_generated_transcript"):
+            try:
+                tr = getattr(listing, finder)(TRANSCRIPT_LANGS)
+                segs = tr.fetch()
+                text = " ".join(s.get("text","") for s in segs)
+                if text.strip():
+                    if YOUTUBE_TRANSLATE_TO_EN and tr.language_code not in ("en","en-US","en-GB"):
+                        try:
+                            tr_en = tr.translate("en")
+                            segs_en = tr_en.fetch()
+                            text_en = " ".join(s.get("text","") for s in segs_en)
+                            if text_en.strip():
+                                return text_en, {"source":"youtube_translated", "lang": tr.language_code, "translated": True}
+                        except Exception:
+                            # fall through to return non‑EN as‑is
+                            return text, {"source":"youtube_non_en", "lang": tr.language_code, "translated": False}
+                    else:
+                        return text, {"source":"youtube_non_en", "lang": tr.language_code, "translated": False}
+            except Exception:
+                pass
+        # Generic translation if available
+        if YOUTUBE_TRANSLATE_TO_EN:
+            try:
+                for tr in listing:
+                    if any((l.get("language_code") in ("en","en-US","en-GB")) for l in tr.translation_languages):
+                        tr_en = tr.translate("en")
+                        segs_en = tr_en.fetch()
+                        text_en = " ".join(s.get("text","") for s in segs_en)
+                        if text_en.strip():
+                            return text_en, {"source":"youtube_translated", "lang": tr.language_code, "translated": True}
+            except Exception:
+                pass
+
+    # 3) External transcript/show-notes pages via Tavily
+    if tavily_client:
+        title = video_meta.get("title") or ""
+        channel = video_meta.get("channelTitle") or ""
+        queries = [
+            f'"{title}" transcript {channel}',
+            f'{channel} "{title}" "show notes"',
+            f'{channel} "{title}" "full transcript"',
+        ]
+        seen = set()
+        for q in queries:
+            try:
+                res = tavily_client.search(query=q, max_results=5, search_depth="basic", days=365)
+                for it in res.get("results", []):
+                    url = it.get("url")
+                    if not url or url in seen:
+                        continue
+                    seen.add(url)
+                    content = (it.get("content") or "").strip()
+                    # Heuristic: look for transcript-y pages with enough text
+                    if len(content) > 800 and any(k in content.lower() for k in ["transcript", "show notes", "full text"]):
+                        return content[:20000], {"source":"external_page", "lang":"unknown", "translated": False, "url": url}
+            except Exception:
+                continue
+
+    return None, {"source":"none"}
+
+def _fetch_comments_text(video_id: str, max_threads: int = 80) -> Optional[str]:
+    try:
+        with httpx.Client() as client:
+            data = _yt_get(client, "commentThreads", {
+                "part": "snippet",
+                "videoId": video_id,
+                "order": "relevance",
+                "maxResults": 100,
+                "textFormat": "plainText"
+            })
+        texts = []
+        for it in data.get("items", [])[:max_threads]:
+            sn = it.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
+            txt = sn.get("textDisplay") or sn.get("textOriginal")
+            if txt:
+                texts.append(txt)
+        blob = " ".join(texts)
+        return blob[:20000] if blob else None
+    except Exception:
+        return None
+
+def _build_youtube_messages(tkr: str, entity_name: str, drivers: List[str], transcript: str, video_meta: dict, tmeta: dict) -> List[dict]:
+    source_note = f"(transcript source: {tmeta.get('source')}, lang: {tmeta.get('lang','?')}, translated: {tmeta.get('translated',False)})"
+    if tmeta.get("source") == "external_page" and tmeta.get("url"):
+        source_note += f", external_url: {tmeta['url']}"
+
     system = {
         "role":"system",
         "content":(
             "You are an equity/crypto research analyst. "
-            "Given a YouTube transcript, classify the CREATOR'S stance on the asset (bullish/bearish/neutral/mixed), "
-            "and assess whether any of the provided price drivers are suggested to materialize in the NEAR TERM (0–3 months). "
-            "Use only the transcript content; do not invent facts. Return strict JSON."
+            "Given a transcript-like text for a YouTube video, classify the CREATOR'S stance (bullish/bearish/neutral/mixed), "
+            "and assess whether any provided price drivers are suggested to materialize in the NEAR TERM (0–3 months). "
+            "Use only the provided text; do not invent facts. Return strict JSON."
         )
     }
     schema = {
@@ -189,12 +322,12 @@ def _build_youtube_messages(tkr: str, entity_name: str, drivers: List[str], tran
             "Respond with a JSON object:\n"
             "{\n"
             '  "sentiment": "bullish|bearish|neutral|mixed|uncertain",\n'
-            '  "sentiment_score": 0.0-1.0,  // 0 bearish, 0.5 neutral, 1 bullish\n'
+            '  "sentiment_score": 0.0-1.0,\n'
             '  "confidence": "low|medium|high",\n'
             '  "evidence_quotes": ["<<=30 words>>", "..."],\n'
             '  "drivers_assessed": [\n'
-            '     {"driver":"<label>","mentioned":true/false,'
-            '      "near_term_hint":"yes|maybe|no|unclear",'
+            '     {"driver":"<label>","mentioned":true/false,\n'
+            '      "near_term_hint":"yes|maybe|no|unclear",\n'
             '      "rationale":"<<=40 words>>"}\n'
             '  ]\n'
             "}"
@@ -206,6 +339,7 @@ def _build_youtube_messages(tkr: str, entity_name: str, drivers: List[str], tran
             f"Ticker: {tkr}\n"
             f"Name: {entity_name or tkr}\n"
             f"Video: {video_meta.get('title')} (channel: {video_meta.get('channelTitle')})\n"
+            f"{source_note}\n"
             f"Drivers to check: {drivers}\n\n"
             f"TRANSCRIPT (truncated):\n{_shorten(transcript, 12000)}"
         )
@@ -407,25 +541,38 @@ def youtube_sentiment(req: YTSentimentReq, x_client_plan: Optional[str] = Header
     analyzed_count = 0
 
     for v in top:
-        transcript = _fetch_transcript_text(v["videoId"])
+        transcript, tmeta = _fetch_transcript_text_flexible(v)
         analysis = None
+
         if transcript:
             try:
-                messages = _build_youtube_messages(ticker, entity, drivers_list, transcript, v)
+                messages = _build_youtube_messages(ticker, entity, drivers_list, transcript, v, tmeta)
                 content = llm_complete(messages=messages, model=(os.getenv("OPENAI_MODEL") or OPENAI_MODEL), try_json=True)
-                # Parse to dict (be robust)
                 try:
                     analysis = json.loads(content)
                 except Exception:
                     analysis = {"sentiment":"uncertain","sentiment_score":0.5,"confidence":"low",
-                                "evidence_quotes":[], "drivers_assessed":[],"_raw": content}
-                analyzed_count += 1
-                if isinstance(analysis.get("sentiment_score"), (int,float)):
-                    agg_scores.append(float(analysis["sentiment_score"]))
+                                "evidence_quotes":[], "drivers_assessed":[], "_raw": content}
             except Exception as e:
                 analysis = {"error": f"LLM analysis failed: {e}"}
+        elif YOUTUBE_COMMENTS_FALLBACK:
+            comments_text = _fetch_comments_text(v["videoId"])
+            if comments_text and len(comments_text) > 400:
+                try:
+                    # Reuse the same builder but make it very clear in the prompt that this is audience sentiment
+                    cmessages = [
+                        {"role":"system","content":"You are an analyst estimating AUDIENCE sentiment from YouTube comments about an asset. Output JSON with fields: audience_sentiment (bullish/bearish/neutral/mixed), sentiment_score (0..1), confidence, evidence_quotes, drivers_assessed[]."},
+                        {"role":"user","content": f"Ticker: {ticker}\nName: {entity}\nVideo: {v.get('title')} (channel: {v.get('channelTitle')})\nCOMMENTS (sample, truncated):\n{_shorten(comments_text, 12000)}\nDrivers to check: {drivers_list}"}
+                    ]
+                    content = llm_complete(messages=cmessages, model=(os.getenv("OPENAI_MODEL") or OPENAI_MODEL), try_json=True)
+                    analysis = json.loads(content)
+                    analysis["_note"] = "Derived from audience comments, not creator speech."
+                except Exception as e:
+                    analysis = {"note":"No transcript and comment analysis failed.", "error": str(e)}
+            else:
+                analysis = {"note":"No transcript available; insufficient comments for fallback."}
         else:
-            analysis = {"note": "No transcript available; skipped stance analysis."}
+            analysis = {"note":"No transcript available; skipped stance analysis."}
 
         results.append({
             "video_id": v["videoId"],
@@ -437,8 +584,10 @@ def youtube_sentiment(req: YTSentimentReq, x_client_plan: Optional[str] = Header
             "views": v["views"],
             "subscribers": v["subs"],
             "transcript_available": bool(transcript),
+            "transcript_source": tmeta.get("source"),
             "analysis": analysis
         })
+
 
     # Aggregate sentiment (simple avg of analyzed)
     avg_score = sum(agg_scores)/len(agg_scores) if agg_scores else None
