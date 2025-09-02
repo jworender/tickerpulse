@@ -588,6 +588,10 @@ def youtube_sentiment(req: YTSentimentReq, x_client_plan: Optional[str] = Header
             "analysis": analysis
         })
 
+        if isinstance(analysis, dict) and isinstance(analysis.get("sentiment_score"), (int, float)):
+            agg_scores.append(float(analysis["sentiment_score"]))
+            analyzed_count += 1
+
 
     # Aggregate sentiment (simple avg of analyzed)
     avg_score = sum(agg_scores)/len(agg_scores) if agg_scores else None
@@ -601,7 +605,10 @@ def youtube_sentiment(req: YTSentimentReq, x_client_plan: Optional[str] = Header
         "time": r["published_at"][11:19] + "Z",
         "title": r["title"],
         "creator": r["channel_title"],
-        "url": r["url"]
+        "url": r["url"],
+        "transcript_source": r.get("transcript_source") or ("—" if not r.get("transcript_available") else "unknown"),
+        "views": r.get("views"),
+        "subscribers": r.get("subscribers"),
     } for r in results]
 
     return {

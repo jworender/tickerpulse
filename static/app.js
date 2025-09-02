@@ -160,27 +160,35 @@ form.addEventListener("submit", async (e) => {
 function renderYouTubeSection(y) {
   const head = `<div class='section-title'>YouTube sentiment (last ${y.lookback_days} days)</div>`;
   const agg = y.aggregate_sentiment && y.aggregate_sentiment.label
-    ? `<div class='muted small'>Aggregate stance: <b>${y.aggregate_sentiment.label}</b> (avg score ${y.aggregate_sentiment.avg_score?.toFixed(2) ?? "—"})</div>`
+    ? `<div class='muted small'>Aggregate stance: <b>${y.aggregate_sentiment.label}</b>${(y.aggregate_sentiment.avg_score!=null?` (avg score ${y.aggregate_sentiment.avg_score.toFixed(2)})`:"")}</div>`
     : `<div class='muted small'>No transcripts analyzed.</div>`;
 
-  const table = (!y.table_rows || !y.table_rows.length) ? "<div class='muted small'>No recent videos.</div>"
+  const table = (!y.table_rows || !y.table_rows.length)
+    ? "<div class='muted small'>No recent videos.</div>"
     : `<table>
-        <thead><tr><th>Date</th><th>Time (UTC)</th><th>Title</th><th>Creator</th><th>Link</th></tr></thead>
-        <tbody>
-          ${y.table_rows.map(r => `
-            <tr>
-              <td>${r.date}</td>
-              <td>${r.time}</td>
-              <td>${r.title}</td>
-              <td>${r.creator}</td>
-              <td>${(v.transcript_source || "—")}</td>
-              <td><a href="${r.url}" target="_blank" rel="noopener">Watch</a></td>
-            </tr>`).join("")}
-        </tbody>
-      </table>`;
+         <thead>
+           <tr>
+             <th>Date</th><th>Time (UTC)</th><th>Title</th><th>Creator</th>
+             <th>Transcript</th><th>Link</th>
+           </tr>
+         </thead>
+         <tbody>
+           ${y.table_rows.map(r => `
+             <tr>
+               <td>${r.date}</td>
+               <td>${r.time}</td>
+               <td>${r.title}</td>
+               <td>${r.creator}</td>
+               <td>${r.transcript_source || "—"}</td>
+               <td><a href="${r.url}" target="_blank" rel="noopener">Watch</a></td>
+             </tr>
+           `).join("")}
+         </tbody>
+       </table>`;
 
   addMsg("bot", head + agg + table);
 }
+
 
 async function triggerYouTube(ticker, entityName, assetType, drivers) {
   const spinnerId = `spin-yt-${Date.now()}`;
